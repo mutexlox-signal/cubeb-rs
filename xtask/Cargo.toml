@@ -3,6 +3,8 @@ name = "xtask"
 version = "0.18.0"
 edition = "2021"
 publish = false
+
+[package.metadata.release]
 release = false
 
 [dependencies]

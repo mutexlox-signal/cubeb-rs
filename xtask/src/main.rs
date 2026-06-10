@@ -48,8 +48,51 @@ fn visit_dirs(dir: &Path, cb: &dyn Fn(&fs::DirEntry)) -> std::io::Result<()> {
     Ok(())
 }
 
+fn package_version(manifest: &Path) -> Result<String, DynError> {
+    let contents = fs::read_to_string(manifest)?;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("version = \"") {
+            if let Some(end) = rest.find('"') {
+                return Ok(rest[..end].to_string());
+            }
+        }
+    }
+    Err(format!("no version key found in {}", manifest.display()).into())
+}
+
+// For packaged build: rename libcubeb Cargo.toml files to Cargo.toml.in (or
+// back again).
+fn rename_libcubeb_manifests(from: &str, to: &str) -> Result<(), DynError> {
+    visit_dirs(&project_root().join("cubeb-sys/libcubeb"), &|entry| {
+        let path = entry.path();
+        if path.file_name().unwrap().to_str().unwrap().ends_with(from) {
+            let new_path = path.with_file_name(to);
+            fs::rename(&path, &new_path).unwrap();
+        }
+    })?;
+    Ok(())
+}
+
+fn publish(cargo: &str, package: &str, allow_dirty: bool) -> Result<(), DynError> {
+    let mut args = vec!["publish", "--package", package];
+    if allow_dirty {
+        args.push("--allow-dirty");
+    }
+    let status = Command::new(cargo)
+        .current_dir(project_root())
+        .args(args)
+        .status()?;
+    if !status.success() {
+        Err(format!("cargo publish {package} failed"))?;
+    }
+    Ok(())
+}
+
 fn release(version: &str) -> Result<(), DynError> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let manifest = project_root().join("cubeb-sys/Cargo.toml");
+    let version_before = package_version(&manifest)?;
 
     let status = Command::new(&cargo)
         .current_dir(project_root())
@@ -60,69 +103,22 @@ fn release(version: &str) -> Result<(), DynError> {
         Err("cargo release failed")?;
     }
 
-    // For packaged build: rename libcubeb Cargo.toml files to Cargo.toml.in.
-    visit_dirs(Path::new("cubeb-sys/libcubeb"), &|entry| {
-        let path = entry.path();
-        if path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .ends_with("Cargo.toml")
-        {
-            let new_path = path.with_file_name("Cargo.toml.in");
-            fs::rename(&path, &new_path).unwrap();
-        }
-    })
-    .unwrap();
-
-    let status = Command::new(&cargo)
-        .current_dir(project_root())
-        .args(["publish", "--package", "cubeb-sys", "--allow-dirty"])
-        .status()?;
-    if !status.success() {
-        Err("cargo publish failed")?;
+    // cargo release exits successfully when its confirmation prompt is
+    // declined (or unanswerable without a tty), so check it actually bumped
+    // the versions before publishing anything.
+    if package_version(&manifest)? == version_before {
+        Err("cargo release did not bump any versions (release declined?)")?;
     }
 
-    // Rename libcubeb Cargo.toml.in files back to Cargo.toml.
-    visit_dirs(Path::new("cubeb-sys/libcubeb"), &|entry| {
-        let path = entry.path();
-        if path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .ends_with("Cargo.toml.in")
-        {
-            let new_path = path.with_file_name("Cargo.toml");
-            fs::rename(&path, &new_path).unwrap();
-        }
-    })
-    .unwrap();
+    rename_libcubeb_manifests("Cargo.toml", "Cargo.toml.in")?;
+    let result = publish(&cargo, "cubeb-sys", true);
+    // Rename the manifests back even if the publish failed.
+    rename_libcubeb_manifests("Cargo.toml.in", "Cargo.toml")?;
+    result?;
 
-    let status = Command::new(&cargo)
-        .current_dir(project_root())
-        .args(["publish", "--package", "cubeb-core"])
-        .status()?;
-    if !status.success() {
-        Err("cargo publish failed")?;
-    }
-
-    let status = Command::new(&cargo)
-        .current_dir(project_root())
-        .args(["publish", "--package", "cubeb-backend"])
-        .status()?;
-    if !status.success() {
-        Err("cargo publish failed")?;
-    }
-
-    let status = Command::new(&cargo)
-        .current_dir(project_root())
-        .args(["publish", "--package", "cubeb"])
-        .status()?;
-    if !status.success() {
-        Err("cargo publish failed")?;
-    }
+    publish(&cargo, "cubeb-core", false)?;
+    publish(&cargo, "cubeb-backend", false)?;
+    publish(&cargo, "cubeb", false)?;
 
     Ok(())
 }
