@@ -110,6 +110,14 @@ fn release(version: &str) -> Result<(), DynError> {
         Err("cargo release did not bump any versions (release declined?)")?;
     }
 
+    let status = Command::new("git")
+        .current_dir(project_root())
+        .args(["submodule", "update", "--init", "--recursive"])
+        .status()?;
+    if !status.success() {
+        Err("git submodule update failed")?;
+    }
+
     rename_libcubeb_manifests("Cargo.toml", "Cargo.toml.in")?;
     let result = publish(&cargo, "cubeb-sys", true);
     // Rename the manifests back even if the publish failed.
